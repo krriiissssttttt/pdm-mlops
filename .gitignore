@@ -1,0 +1,9 @@
+mlflow.db
+mlruns/
+mlartifacts/
+model.joblib
+metrics.json
+cloudflared
+*.log
+__pycache__/
+.pytest_cache/
