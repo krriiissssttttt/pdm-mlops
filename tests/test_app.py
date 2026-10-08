@@ -1,9 +1,10 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app import app
+from app import app, limiter
 
-client = TestClient(app)
+client = TestClient(app, headers={"X-API-Key": "test-key"})
+anonymous = TestClient(app)
 HEALTHY = {"air_temp_k": 300, "process_temp_k": 310.5, "rotational_speed_rpm": 1550,
            "torque_nm": 38, "tool_wear_min": 20}
 RISKY = {**HEALTHY, "torque_nm": 62, "tool_wear_min": 230}     # worn tool under high torque
@@ -72,3 +73,26 @@ def test_my_own_idea():
     assert client.post("/predict", json={**HEALTHY, "torque_nm": "high"}).status_code == 422
     new_tool = client.post("/predict", json={**HEALTHY, "tool_wear_min": 0}).json()
     assert new_tool["failure_predicted"] is False
+
+
+# ---------- access control ----------
+def test_predict_without_api_key_is_rejected():
+    assert anonymous.post("/predict", json=HEALTHY).status_code == 401
+
+
+def test_predict_with_wrong_api_key_is_rejected():
+    r = anonymous.post("/predict", json=HEALTHY, headers={"X-API-Key": "wrong"})
+    assert r.status_code == 401
+
+
+def test_health_needs_no_api_key():
+    assert anonymous.get("/health").status_code == 200
+
+
+def test_rate_limit_returns_429(monkeypatch):
+    monkeypatch.setenv("RATE_LIMIT", "3/minute")
+    limiter.reset()
+    codes = [client.post("/predict", json=HEALTHY).status_code for _ in range(5)]
+    assert codes == [200, 200, 200, 429, 429]
+    limiter.reset()
+

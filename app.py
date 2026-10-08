@@ -1,12 +1,17 @@
 """FastAPI service that predicts machine failure from one sensor reading."""
+import hmac
 import logging
 import os
 import time
 
 import joblib
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Request, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 FEATURES = ["air_temp_k", "process_temp_k", "rotational_speed_rpm", "torque_nm", "tool_wear_min"]
 
@@ -38,6 +43,25 @@ log.info("Model loaded from %s", MODEL_SOURCE)
 app = FastAPI(title="Machine Failure Prediction API", version="1.0.0",
               description="Predicts whether a milling machine will fail soon, from one sensor reading.")
 
+# Access control: /predict needs the X-API-Key header. With no API_KEY set, every request is rejected.
+API_KEY = os.getenv("API_KEY")
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def require_api_key(key: str | None = Security(api_key_header)):
+    if not API_KEY or not key or not hmac.compare_digest(key, API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+# Limits are counted in memory per client IP; behind a proxy every client would share the proxy's IP.
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+def rate_limit():
+    return os.getenv("RATE_LIMIT", "3/second")      # read per request so tests can change it
+
 
 # TODO 3a: set limits (ge = minimum, le = maximum) so impossible readings get a 422 error.
 # One field is done for you as an example. Use df.describe() from Part 1:
@@ -52,6 +76,8 @@ app = FastAPI(title="Machine Failure Prediction API", version="1.0.0",
 # DISCUSSION (open-ended): reject what is physically impossible (422). For a possible but never-seen value,
 #   a real service would still answer but log a warning and flag the answer as low confidence, because the
 #   model is guessing outside what it has seen.
+
+# INPUT VALIDATION FOR ML MODEL PREDICTION INPUTS
 class SensorReading(BaseModel):
     air_temp_k: float = Field(..., ge=290, le=310, description="Air temperature (K)", examples=[300.0])
     process_temp_k: float = Field(..., ge=300, le=320, description="Process temperature (K)", examples=[310.5])
@@ -81,8 +107,9 @@ def model_info():
     return {"model_source": MODEL_SOURCE, "threshold": THRESHOLD, "features": FEATURES}
 
 
-@app.post("/predict", response_model=Prediction)
-def predict(reading: SensorReading):
+@app.post("/predict", response_model=Prediction, dependencies=[Depends(require_api_key)])
+@limiter.limit(rate_limit)
+def predict(request: Request, reading: SensorReading):
     start = time.perf_counter()
     X = pd.DataFrame([reading.model_dump()])[FEATURES]
     probability = float(model.predict_proba(X)[0, 1])

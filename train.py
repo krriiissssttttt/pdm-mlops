@@ -7,6 +7,7 @@ import joblib
 import mlflow
 import mlflow.sklearn
 from mlflow import MlflowClient
+from mlflow.exceptions import MlflowException
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, precision_score, recall_score, roc_auc_score
@@ -72,6 +73,18 @@ def check_todos():
         raise SystemExit("Fill these in before training: " + ", ".join(missing))
 
 
+def champion_pr_auc():
+    """PR-AUC of the current @production model, or None if there is none yet."""
+    client = MlflowClient()
+    try:
+        version = client.get_model_version_by_alias(MODEL_NAME, "production")
+    except MlflowException:
+        return None
+    if not version.run_id:
+        return None
+    return client.get_run(version.run_id).data.metrics.get("pr_auc")
+
+
 def main():
     check_todos()
     mlflow.set_tracking_uri(TRACKING_URI)
@@ -131,6 +144,13 @@ def main():
     print(f"\nWinner by {SELECT_BY}: {best}")
     if best_metrics["pr_auc"] < MIN_PR_AUC:
         raise SystemExit(f"Quality gate FAILED: {best} has PR-AUC {best_metrics['pr_auc']:.3f} < {MIN_PR_AUC}")
+
+    # Champion vs challenger: every run scores on the same seeded test split, so the numbers are comparable.
+    champion = champion_pr_auc()
+    if champion is not None and best_metrics["pr_auc"] <= champion:
+        print(f"Not promoted: {best} PR-AUC {best_metrics['pr_auc']:.3f} does not beat "
+              f"@production PR-AUC {champion:.3f}. model.joblib and @production left unchanged.")
+        return
 
     # Save the model file first: the API tests and the Docker image use it
     joblib.dump(results[best]["model"], "model.joblib")

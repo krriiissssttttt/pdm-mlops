@@ -48,11 +48,18 @@ jobs:
         run: docker build -t machine-failure-api .
 
       - name: Smoke test the running container
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
         run: |
-          docker run -d -p 8000:8000 --name api machine-failure-api
+          API_KEY="${API_KEY:-$(openssl rand -hex 16)}"   # fork PRs get no secrets, so fall back to a random key
+          docker run -d -p 8000:8000 -e API_KEY="$API_KEY" --name api machine-failure-api
           for i in $(seq 1 30); do curl -fs http://localhost:8000/health && break; sleep 2; done
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/predict \
+            -H "Content-Type: application/json" \
+            -d '{"air_temp_k":300,"process_temp_k":310.5,"rotational_speed_rpm":1550,"torque_nm":62,"tool_wear_min":230}')" = 401
           curl -fs -X POST http://localhost:8000/predict \
             -H "Content-Type: application/json" \
+            -H "X-API-Key: $API_KEY" \
             -d '{"air_temp_k":300,"process_temp_k":310.5,"rotational_speed_rpm":1550,"torque_nm":62,"tool_wear_min":230}'
           docker logs api
 
